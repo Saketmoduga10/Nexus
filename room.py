@@ -26,7 +26,10 @@ class Room:
 
         async def _safe_send(ws: Any) -> None:
             try:
-                await ws.send(message)
+                if isinstance(message, str):
+                    await ws.send_text(message)
+                else:
+                    await ws.send_json(message)
             except Exception:
                 self.clients.discard(ws)
 
