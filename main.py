@@ -63,6 +63,8 @@ async def ws_room(websocket: WebSocket, room_id: str) -> None:
                     counter=message["counter"],
                 )
                 await room.broadcast(raw, exclude=websocket)
+            elif msg_type == "cursor":
+                await room.broadcast(raw, exclude=websocket)
             else:
                 await websocket.send_text(
                     json.dumps(
