@@ -14,6 +14,12 @@ export type DeleteOperation = {
 
 export type Operation = InsertOperation | DeleteOperation;
 
+export type CursorOperation = {
+  type: "cursor";
+  site_id: string;
+  position: number;
+};
+
 export type CharacterJSON = {
   id: [site_id: string, counter: number];
   value: string;
@@ -29,7 +35,7 @@ type StateMessage = {
   document: DocumentJSON;
 };
 
-type IncomingMessage = StateMessage | Operation | { type: "error"; error?: string };
+type IncomingMessage = StateMessage | Operation | CursorOperation | { type: "error"; error?: string };
 
 export class CollabSocket {
   readonly room_id: string;
@@ -37,6 +43,7 @@ export class CollabSocket {
 
   onStateSync?: (doc: DocumentJSON) => void;
   onOperation?: (op: Operation) => void;
+  onCursor?: (cursor: CursorOperation) => void;
   onConnect?: () => void;
 
   private ws: WebSocket | null = null;
@@ -79,6 +86,15 @@ export class CollabSocket {
     this.ws.send(payload);
   }
 
+  sendCursor(position: number) {
+    const payload = JSON.stringify({ type: "cursor", site_id: this.site_id, position } satisfies CursorOperation);
+    if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
+      this.pendingSends.push(payload);
+      return;
+    }
+    this.ws.send(payload);
+  }
+
   private connect() {
     if (this.ws && (this.ws.readyState === WebSocket.OPEN || this.ws.readyState === WebSocket.CONNECTING)) {
       return;
@@ -111,6 +127,13 @@ export class CollabSocket {
 
       if (parsed.type === "insert" || parsed.type === "delete") {
         this.onOperation?.(parsed);
+        return;
+      }
+
+      if (parsed.type === "cursor") {
+        if (parsed.site_id !== this.site_id) {
+          this.onCursor?.(parsed);
+        }
       }
     };
 
