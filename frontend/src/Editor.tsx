@@ -60,6 +60,9 @@ function findDiff(oldText: string, newText: string): { index: number; removed: s
 export function Editor({ room_id, site_id }: EditorProps) {
   const [value, setValue] = useState<string>("");
   const [remoteCursors, setRemoteCursors] = useState<Record<string, CursorOperation>>({});
+  const remoteCursorPositionsRef = useRef<Record<string, { lineNumber: number; column: number }>>({});
+  const [cursorRenderTick, setCursorRenderTick] = useState<number>(0);
+  const [editorReady, setEditorReady] = useState<boolean>(false);
 
   const socketRef = useRef<CollabSocket | null>(null);
   const counterRef = useRef<number>(0);
@@ -70,6 +73,8 @@ export function Editor({ room_id, site_id }: EditorProps) {
   const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
   const monacoRef = useRef<typeof Monaco | null>(null);
   const decorationIdsByUserRef = useRef<Record<string, string[]>>({});
+  const viewportDisposableRef = useRef<{ dispose: () => void } | null>(null);
+  const layoutDisposableRef = useRef<{ dispose: () => void } | null>(null);
 
   const COLORS = ["#3b82f6", "#22c55e", "#f97316", "#a855f7", "#ef4444", "#06b6d4"] as const;
   const colorForSiteId = (id: string): string => {
@@ -87,12 +92,15 @@ export function Editor({ room_id, site_id }: EditorProps) {
     const model = editor.getModel();
     if (!model) return;
 
+    const nextPositions: Record<string, { lineNumber: number; column: number }> = {};
+
     for (const [remoteSiteId, cursor] of Object.entries(remoteCursors)) {
       const safe = safeClass(remoteSiteId);
 
       const decorations: Monaco.editor.IModelDeltaDecoration[] = [];
 
       const pos = model.getPositionAt(Math.max(0, cursor.position));
+      nextPositions[remoteSiteId] = { lineNumber: pos.lineNumber, column: pos.column };
       decorations.push({
         range: new monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column),
         options: {
@@ -121,13 +129,18 @@ export function Editor({ room_id, site_id }: EditorProps) {
       const nextIds = editor.deltaDecorations(prevIds, decorations);
       decorationIdsByUserRef.current[remoteSiteId] = nextIds;
     }
+
+    remoteCursorPositionsRef.current = nextPositions;
+    setCursorRenderTick((t) => t + 1);
   };
 
   useEffect(() => {
     const sock = new CollabSocket(room_id, site_id);
     socketRef.current = sock;
     setRemoteCursors({});
+    remoteCursorPositionsRef.current = {};
     decorationIdsByUserRef.current = {};
+    setEditorReady(false);
 
     sock.onStateSync = (doc: DocumentJSON) => {
       charsRef.current = Array.isArray(doc.characters) ? [...doc.characters] : [];
@@ -167,12 +180,34 @@ export function Editor({ room_id, site_id }: EditorProps) {
     return () => {
       cursorDisposableRef.current?.dispose();
       cursorDisposableRef.current = null;
+      viewportDisposableRef.current?.dispose();
+      viewportDisposableRef.current = null;
+      layoutDisposableRef.current?.dispose();
+      layoutDisposableRef.current = null;
       editorRef.current = null;
       monacoRef.current = null;
       sock.disconnect();
       socketRef.current = null;
     };
   }, [room_id, site_id]);
+
+  useEffect(() => {
+    const editor = editorRef.current;
+    if (!editor) return;
+
+    viewportDisposableRef.current?.dispose();
+    layoutDisposableRef.current?.dispose();
+
+    viewportDisposableRef.current = editor.onDidScrollChange(() => setCursorRenderTick((t) => t + 1));
+    layoutDisposableRef.current = editor.onDidLayoutChange(() => setCursorRenderTick((t) => t + 1));
+
+    return () => {
+      viewportDisposableRef.current?.dispose();
+      viewportDisposableRef.current = null;
+      layoutDisposableRef.current?.dispose();
+      layoutDisposableRef.current = null;
+    };
+  }, [editorReady]);
 
   useEffect(() => {
     const styleElId = "nexus-remote-cursors-style";
@@ -224,7 +259,39 @@ export function Editor({ room_id, site_id }: EditorProps) {
   }, [remoteCursors]);
 
   return (
-    <div style={{ height: "100vh", width: "100%" }}>
+    <div style={{ height: "100vh", width: "100%", position: "relative" }}>
+      <div style={{ position: "absolute", inset: 0, pointerEvents: "none", zIndex: 20 }}>
+        {cursorRenderTick >= 0 &&
+          Object.entries(remoteCursorPositionsRef.current).map(([remoteSiteId, pos]) => {
+          if (remoteSiteId === site_id) return null;
+          const editor = editorRef.current;
+          if (!editor) return null;
+          const visible = editor.getScrolledVisiblePosition(pos);
+          if (!visible) return null;
+          const color = colorForSiteId(remoteSiteId);
+          return (
+            <div
+              key={remoteSiteId}
+              style={{
+                position: "absolute",
+                left: visible.left,
+                top: visible.top,
+                transform: "translateY(-100%)",
+                background: color,
+                color: "#0b0f17",
+                padding: "2px 8px",
+                borderRadius: 999,
+                fontSize: 12,
+                fontWeight: 650,
+                boxShadow: "0 6px 18px rgba(0,0,0,0.35)",
+                whiteSpace: "nowrap",
+              }}
+            >
+              {remoteSiteId}
+            </div>
+          );
+        })}
+      </div>
       <MonacoEditor
         height="100%"
         theme="vs-dark"
@@ -233,6 +300,7 @@ export function Editor({ room_id, site_id }: EditorProps) {
         onMount={(editor, monaco) => {
           editorRef.current = editor;
           monacoRef.current = monaco as unknown as typeof Monaco;
+          setEditorReady(true);
           cursorDisposableRef.current?.dispose();
           cursorDisposableRef.current = editor.onDidChangeCursorPosition(() => {
             const sock = socketRef.current;
