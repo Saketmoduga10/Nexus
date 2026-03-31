@@ -2,7 +2,7 @@ import { useEffect, useRef, useState } from "react";
 import MonacoEditor from "@monaco-editor/react";
 import type { CharacterJSON, CursorOperation, DocumentJSON, Operation } from "./socket";
 import { CollabSocket } from "./socket";
-import { Cursors } from "./Cursors";
+import type * as Monaco from "monaco-editor";
 
 type EditorProps = {
   room_id: string;
@@ -57,16 +57,9 @@ function findDiff(oldText: string, newText: string): { index: number; removed: s
   };
 }
 
-function lineIndexFromOffset(text: string, offset: number): number {
-  const clamped = Math.max(0, Math.min(offset, text.length));
-  let line = 0;
-  for (let i = 0; i < clamped; i++) if (text[i] === "\n") line += 1;
-  return line;
-}
-
 export function Editor({ room_id, site_id }: EditorProps) {
   const [value, setValue] = useState<string>("");
-  const [remoteCursors, setRemoteCursors] = useState<Record<string, number>>({});
+  const [remoteCursors, setRemoteCursors] = useState<Record<string, CursorOperation>>({});
 
   const socketRef = useRef<CollabSocket | null>(null);
   const counterRef = useRef<number>(0);
@@ -74,11 +67,67 @@ export function Editor({ room_id, site_id }: EditorProps) {
   const applyingRemoteRef = useRef<boolean>(false);
   const charsRef = useRef<CharacterJSON[]>([]);
   const cursorDisposableRef = useRef<{ dispose: () => void } | null>(null);
+  const editorRef = useRef<Monaco.editor.IStandaloneCodeEditor | null>(null);
+  const monacoRef = useRef<typeof Monaco | null>(null);
+  const decorationIdsByUserRef = useRef<Record<string, string[]>>({});
+
+  const COLORS = ["#3b82f6", "#22c55e", "#f97316", "#a855f7", "#ef4444", "#06b6d4"] as const;
+  const colorForSiteId = (id: string): string => {
+    let sum = 0;
+    for (let i = 0; i < id.length; i++) sum += id.charCodeAt(i);
+    return COLORS[sum % COLORS.length];
+  };
+
+  const safeClass = (id: string) => id.replace(/[^a-zA-Z0-9_-]/g, "_");
+
+  const applyRemoteDecorations = () => {
+    const editor = editorRef.current;
+    const monaco = monacoRef.current;
+    if (!editor || !monaco) return;
+    const model = editor.getModel();
+    if (!model) return;
+
+    for (const [remoteSiteId, cursor] of Object.entries(remoteCursors)) {
+      const safe = safeClass(remoteSiteId);
+
+      const decorations: Monaco.editor.IModelDeltaDecoration[] = [];
+
+      const pos = model.getPositionAt(Math.max(0, cursor.position));
+      decorations.push({
+        range: new monaco.Range(pos.lineNumber, pos.column, pos.lineNumber, pos.column),
+        options: {
+          afterContentClassName: `remote-cursor-${safe}`,
+          stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+        },
+      });
+
+      const start = cursor.selectionStart;
+      const end = cursor.selectionEnd;
+      if (typeof start === "number" && typeof end === "number" && start !== end) {
+        const a = Math.max(0, Math.min(start, end));
+        const b = Math.max(0, Math.max(start, end));
+        const p1 = model.getPositionAt(a);
+        const p2 = model.getPositionAt(b);
+        decorations.push({
+          range: new monaco.Range(p1.lineNumber, p1.column, p2.lineNumber, p2.column),
+          options: {
+            className: `remote-cursor-selection-${safe}`,
+            stickiness: monaco.editor.TrackedRangeStickiness.NeverGrowsWhenTypingAtEdges,
+          },
+        });
+      }
+
+      const prevIds = decorationIdsByUserRef.current[remoteSiteId] ?? [];
+      const nextIds = editor.deltaDecorations(prevIds, decorations);
+      decorationIdsByUserRef.current[remoteSiteId] = nextIds;
+    }
+  };
 
   useEffect(() => {
     const sock = new CollabSocket(room_id, site_id);
     socketRef.current = sock;
     setRemoteCursors({});
+    decorationIdsByUserRef.current = {};
 
     sock.onStateSync = (doc: DocumentJSON) => {
       charsRef.current = Array.isArray(doc.characters) ? [...doc.characters] : [];
@@ -90,8 +139,7 @@ export function Editor({ room_id, site_id }: EditorProps) {
     };
 
     sock.onCursor = (cursor: CursorOperation) => {
-      const lineIndex = lineIndexFromOffset(prevContentRef.current, cursor.position);
-      setRemoteCursors((prev) => ({ ...prev, [cursor.site_id]: lineIndex }));
+      setRemoteCursors((prev) => ({ ...prev, [cursor.site_id]: cursor }));
     };
 
     sock.onOperation = (op: Operation) => {
@@ -119,22 +167,72 @@ export function Editor({ room_id, site_id }: EditorProps) {
     return () => {
       cursorDisposableRef.current?.dispose();
       cursorDisposableRef.current = null;
+      editorRef.current = null;
+      monacoRef.current = null;
       sock.disconnect();
       socketRef.current = null;
     };
   }, [room_id, site_id]);
 
+  useEffect(() => {
+    const styleElId = "nexus-remote-cursors-style";
+    let el = document.getElementById(styleElId) as HTMLStyleElement | null;
+    if (!el) {
+      el = document.createElement("style");
+      el.id = styleElId;
+      document.head.appendChild(el);
+    }
+
+    const users = Object.keys(remoteCursors);
+    const css =
+      `
+@keyframes nexusRemoteCursorBlink { 0%,49%{opacity:1} 50%,100%{opacity:0} }
+` +
+      users
+        .map((uid) => {
+          const color = colorForSiteId(uid);
+          const safe = safeClass(uid);
+          return `
+.remote-cursor-${safe} {
+  position: relative;
+  display: inline-block;
+  width: 0;
+  height: 1.4em;
+  vertical-align: text-bottom;
+  pointer-events: none;
+}
+.remote-cursor-${safe}::after {
+  content: "";
+  position: absolute;
+  left: -1px;
+  top: -0.15em;
+  bottom: -0.15em;
+  width: 2px;
+  background: ${color};
+  animation: nexusRemoteCursorBlink 1s step-start infinite;
+}
+.remote-cursor-selection-${safe} {
+  background: ${color}33;
+}
+`;
+        })
+        .join("\n");
+
+    el.textContent = css;
+
+    applyRemoteDecorations();
+  }, [remoteCursors]);
+
   return (
-    <div style={{ height: "100vh", width: "100%", position: "relative" }}>
-      <div style={{ position: "absolute", inset: 0, zIndex: 10 }}>
-        <Cursors cursors={remoteCursors} currentUser={site_id} />
-      </div>
+    <div style={{ height: "100vh", width: "100%" }}>
       <MonacoEditor
         height="100%"
         theme="vs-dark"
         defaultLanguage="typescript"
         value={value}
-        onMount={(editor) => {
+        onMount={(editor, monaco) => {
+          editorRef.current = editor;
+          monacoRef.current = monaco as unknown as typeof Monaco;
           cursorDisposableRef.current?.dispose();
           cursorDisposableRef.current = editor.onDidChangeCursorPosition(() => {
             const sock = socketRef.current;
@@ -142,9 +240,19 @@ export function Editor({ room_id, site_id }: EditorProps) {
             const model = editor.getModel();
             const pos = editor.getPosition();
             if (!model || !pos) return;
+
             const offset = model.getOffsetAt(pos);
-            sock.sendCursor(offset);
+            const sel = editor.getSelection();
+            if (sel && !sel.isEmpty()) {
+              const selectionStart = model.getOffsetAt(sel.getStartPosition());
+              const selectionEnd = model.getOffsetAt(sel.getEndPosition());
+              sock.sendCursor(offset, selectionStart, selectionEnd);
+            } else {
+              sock.sendCursor(offset);
+            }
           });
+
+          applyRemoteDecorations();
         }}
         onChange={(next) => {
           const nextValue = next ?? "";

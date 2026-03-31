@@ -18,6 +18,8 @@ export type CursorOperation = {
   type: "cursor";
   site_id: string;
   position: number;
+  selectionStart?: number;
+  selectionEnd?: number;
 };
 
 export type CharacterJSON = {
@@ -86,8 +88,10 @@ export class CollabSocket {
     this.ws.send(payload);
   }
 
-  sendCursor(position: number) {
-    const payload = JSON.stringify({ type: "cursor", site_id: this.site_id, position } satisfies CursorOperation);
+  sendCursor(position: number, selectionStart?: number, selectionEnd?: number) {
+    const payload = JSON.stringify(
+      { type: "cursor", site_id: this.site_id, position, selectionStart, selectionEnd } satisfies CursorOperation,
+    );
     if (!this.ws || this.ws.readyState !== WebSocket.OPEN) {
       this.pendingSends.push(payload);
       return;
