@@ -1,7 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import MonacoEditor from "@monaco-editor/react";
-import type { CharacterJSON, DocumentJSON, Operation } from "./socket";
+import type { CharacterJSON, CursorOperation, DocumentJSON, Operation } from "./socket";
 import { CollabSocket } from "./socket";
+import { Cursors } from "./Cursors";
 
 type EditorProps = {
   room_id: string;
@@ -56,18 +57,28 @@ function findDiff(oldText: string, newText: string): { index: number; removed: s
   };
 }
 
+function lineIndexFromOffset(text: string, offset: number): number {
+  const clamped = Math.max(0, Math.min(offset, text.length));
+  let line = 0;
+  for (let i = 0; i < clamped; i++) if (text[i] === "\n") line += 1;
+  return line;
+}
+
 export function Editor({ room_id, site_id }: EditorProps) {
   const [value, setValue] = useState<string>("");
+  const [remoteCursors, setRemoteCursors] = useState<Record<string, number>>({});
 
   const socketRef = useRef<CollabSocket | null>(null);
   const counterRef = useRef<number>(0);
   const prevContentRef = useRef<string>("");
   const applyingRemoteRef = useRef<boolean>(false);
   const charsRef = useRef<CharacterJSON[]>([]);
+  const cursorDisposableRef = useRef<{ dispose: () => void } | null>(null);
 
   useEffect(() => {
     const sock = new CollabSocket(room_id, site_id);
     socketRef.current = sock;
+    setRemoteCursors({});
 
     sock.onStateSync = (doc: DocumentJSON) => {
       charsRef.current = Array.isArray(doc.characters) ? [...doc.characters] : [];
@@ -76,6 +87,11 @@ export function Editor({ room_id, site_id }: EditorProps) {
       setValue(next);
       prevContentRef.current = next;
       applyingRemoteRef.current = false;
+    };
+
+    sock.onCursor = (cursor: CursorOperation) => {
+      const lineIndex = lineIndexFromOffset(prevContentRef.current, cursor.position);
+      setRemoteCursors((prev) => ({ ...prev, [cursor.site_id]: lineIndex }));
     };
 
     sock.onOperation = (op: Operation) => {
@@ -101,18 +117,35 @@ export function Editor({ room_id, site_id }: EditorProps) {
     };
 
     return () => {
+      cursorDisposableRef.current?.dispose();
+      cursorDisposableRef.current = null;
       sock.disconnect();
       socketRef.current = null;
     };
   }, [room_id, site_id]);
 
   return (
-    <div style={{ height: "100vh", width: "100%" }}>
+    <div style={{ height: "100vh", width: "100%", position: "relative" }}>
+      <div style={{ position: "absolute", inset: 0, zIndex: 10 }}>
+        <Cursors cursors={remoteCursors} currentUser={site_id} />
+      </div>
       <MonacoEditor
         height="100%"
         theme="vs-dark"
         defaultLanguage="typescript"
         value={value}
+        onMount={(editor) => {
+          cursorDisposableRef.current?.dispose();
+          cursorDisposableRef.current = editor.onDidChangeCursorPosition(() => {
+            const sock = socketRef.current;
+            if (!sock) return;
+            const model = editor.getModel();
+            const pos = editor.getPosition();
+            if (!model || !pos) return;
+            const offset = model.getOffsetAt(pos);
+            sock.sendCursor(offset);
+          });
+        }}
         onChange={(next) => {
           const nextValue = next ?? "";
           const oldValue = prevContentRef.current;
