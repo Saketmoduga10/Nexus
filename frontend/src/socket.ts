@@ -104,7 +104,7 @@ export class CollabSocket {
       return;
     }
 
-    const url = `ws://localhost:8000/ws/${encodeURIComponent(this.room_id)}`;
+    const url = `wss://nexus-production-2c6f.up.railway.app/ws/${encodeURIComponent(this.room_id)}`;
     const ws = new WebSocket(url);
     this.ws = ws;
 
